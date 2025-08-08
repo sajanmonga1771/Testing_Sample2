@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  math-operations:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: math-operations:1.0.0
+    container_name: math-operations-app
+    restart: unless-stopped
+    environment:
+      - JAVA_OPTS=-Xms256m -Xmx512m -XX:+UseG1GC
+    volumes:
+      - ./logs:/app/logs
+    stdin_open: true  # Keep STDIN open for interactive console
+    tty: true         # Allocate a pseudo-TTY for interactive console
+    # For future web interface, uncomment the following:
+    # ports:
+    #   - "8080:8080"
+    # networks:
+    #   - math-app-network
+
+# For future use with web interface
+# networks:
+#   math-app-network:
+#     driver: bridge

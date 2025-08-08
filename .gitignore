@@ -1,0 +1,62 @@
+# Ignore Maven build artifacts
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+# Ignore IDE files
+.idea/
+*.iws
+*.iml
+*.ipr
+.vscode/
+.settings/
+.project
+.classpath
+
+# Ignore OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Ignore log files
+logs/
+*.log
+*.log.*
+
+# Ignore temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Ignore Java compiled files
+*.class
+
+# Ignore package files
+*.jar
+*.war
+*.nar
+*.ear
+*.zip
+*.tar.gz
+*.rar
+
+# Ignore JVM crash logs
+hs_err_pid*
+
+# Ignore Maven wrapper
+.mvn/
+
+# Ignore application config (if sensitive)
+application-*.properties
+application-*.yml
+
+# Ignore backup files
+*.bak
+*.backup
