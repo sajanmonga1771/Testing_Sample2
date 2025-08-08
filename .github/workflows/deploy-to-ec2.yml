@@ -1,0 +1,139 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+        - production
+        - staging
+
+env:
+  AWS_REGION: us-east-1
+  APP_NAME: math-operations
+  APP_VERSION: 1.0.0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    outputs:
+      jar-name: ${{ steps.build.outputs.jar-name }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up JDK 11
+      uses: actions/setup-java@v3
+      with:
+        java-version: '11'
+        distribution: 'temurin'
+        
+    - name: Cache Maven dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.m2
+        key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+        restore-keys: ${{ runner.os }}-m2
+        
+    - name: Run tests
+      run: mvn clean test
+      
+    - name: Build application
+      id: build
+      run: |
+        mvn clean package -DskipTests
+        JAR_FILE=$(find target -name "*.jar" -not -name "*-sources.jar" | head -n 1)
+        JAR_NAME=$(basename "$JAR_FILE")
+        echo "jar-name=$JAR_NAME" >> $GITHUB_OUTPUT
+        echo "Built JAR: $JAR_NAME"
+        
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: math-operations-jar
+        path: |
+          target/*.jar
+          deploy-ec2.sh
+          EC2-DEPLOYMENT-GUIDE.md
+        retention-days: 30
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Download build artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: math-operations-jar
+        
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Deploy to EC2
+      env:
+        EC2_HOST: ${{ secrets.EC2_HOST }}
+        EC2_USER: ${{ secrets.EC2_USER }}
+        EC2_KEY: ${{ secrets.EC2_PRIVATE_KEY }}
+      run: |
+        # Save the private key to a file
+        echo "$EC2_KEY" > ec2-key.pem
+        chmod 600 ec2-key.pem
+        
+        # Create deployment directory on EC2
+        ssh -o StrictHostKeyChecking=no -i ec2-key.pem $EC2_USER@$EC2_HOST "mkdir -p ~/deployment"
+        
+        # Copy files to EC2
+        scp -o StrictHostKeyChecking=no -i ec2-key.pem target/*.jar $EC2_USER@$EC2_HOST:~/deployment/
+        scp -o StrictHostKeyChecking=no -i ec2-key.pem deploy-ec2.sh $EC2_USER@$EC2_HOST:~/deployment/
+        
+        # Execute deployment script on EC2
+        ssh -o StrictHostKeyChecking=no -i ec2-key.pem $EC2_USER@$EC2_HOST "
+          cd ~/deployment
+          chmod +x deploy-ec2.sh
+          sudo ./deploy-ec2.sh
+        "
+        
+        # Clean up
+        rm -f ec2-key.pem
+        
+    - name: Verify deployment
+      env:
+        EC2_HOST: ${{ secrets.EC2_HOST }}
+        EC2_USER: ${{ secrets.EC2_USER }}
+        EC2_KEY: ${{ secrets.EC2_PRIVATE_KEY }}
+      run: |
+        echo "$EC2_KEY" > ec2-key.pem
+        chmod 600 ec2-key.pem
+        
+        # Check service status
+        ssh -o StrictHostKeyChecking=no -i ec2-key.pem $EC2_USER@$EC2_HOST "
+          sudo systemctl status math-operations --no-pager
+          echo '--- Application Logs ---'
+          sudo journalctl -u math-operations --no-pager -n 20
+        "
+        
+        rm -f ec2-key.pem
+        
+    - name: Notify deployment status
+      if: always()
+      run: |
+        if [ "${{ job.status }}" == "success" ]; then
+          echo "✅ Deployment to EC2 successful!"
+          echo "🔗 Application deployed at: ${{ secrets.EC2_HOST }}"
+        else
+          echo "❌ Deployment failed. Check the logs above."
+        fi
