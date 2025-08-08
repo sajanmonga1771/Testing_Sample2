@@ -1,0 +1,121 @@
+name: Deploy with AWS CodeDeploy
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'pom.xml'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  APPLICATION_NAME: math-operations
+  DEPLOYMENT_GROUP: production
+  S3_BUCKET: math-operations-deployment-bucket
+
+jobs:
+  deploy-with-codedeploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up JDK 11
+      uses: actions/setup-java@v3
+      with:
+        java-version: '11'
+        distribution: 'temurin'
+        
+    - name: Build application
+      run: |
+        mvn clean package -DskipTests
+        
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Create deployment package
+      run: |
+        # Create CodeDeploy deployment structure
+        mkdir -p deployment-package
+        
+        # Copy application files
+        cp target/*.jar deployment-package/
+        cp deploy-ec2.sh deployment-package/
+        
+        # Create appspec.yml for CodeDeploy
+        cat > deployment-package/appspec.yml << 'EOF'
+        version: 0.0
+        os: linux
+        files:
+          - source: /
+            destination: /home/ec2-user/app
+        permissions:
+          - object: /home/ec2-user/app
+            owner: ec2-user
+            group: ec2-user
+            mode: 755
+            type:
+              - directory
+          - object: /home/ec2-user/app/deploy-ec2.sh
+            owner: ec2-user
+            group: ec2-user
+            mode: 755
+            type:
+              - file
+        hooks:
+          BeforeInstall:
+            - location: scripts/stop_application.sh
+              timeout: 300
+              runas: root
+          ApplicationStart:
+            - location: scripts/start_application.sh
+              timeout: 300
+              runas: root
+          ApplicationStop:
+            - location: scripts/stop_application.sh
+              timeout: 300
+              runas: root
+        EOF
+        
+        # Create deployment scripts
+        mkdir -p deployment-package/scripts
+        
+        cat > deployment-package/scripts/start_application.sh << 'EOF'
+        #!/bin/bash
+        cd /home/ec2-user/app
+        chmod +x deploy-ec2.sh
+        ./deploy-ec2.sh
+        EOF
+        
+        cat > deployment-package/scripts/stop_application.sh << 'EOF'
+        #!/bin/bash
+        if systemctl is-active --quiet math-operations; then
+            systemctl stop math-operations
+        fi
+        EOF
+        
+        chmod +x deployment-package/scripts/*.sh
+        
+        # Create deployment archive
+        cd deployment-package
+        zip -r ../deployment.zip .
+        cd ..
+        
+    - name: Upload to S3
+      run: |
+        aws s3 cp deployment.zip s3://${{ env.S3_BUCKET }}/deployments/math-operations-${{ github.sha }}.zip
+        
+    - name: Create CodeDeploy deployment
+      run: |
+        aws deploy create-deployment \
+          --application-name ${{ env.APPLICATION_NAME }} \
+          --deployment-group-name ${{ env.DEPLOYMENT_GROUP }} \
+          --deployment-config-name CodeDeployDefault.AllAtOne \
+          --s3-location bucket=${{ env.S3_BUCKET }},key=deployments/math-operations-${{ github.sha }}.zip,bundleType=zip \
+          --description "Deployment from GitHub Actions - Commit ${{ github.sha }}"

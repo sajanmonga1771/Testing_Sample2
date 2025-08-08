@@ -1,0 +1,130 @@
+name: Deploy with Docker to EC2
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'pom.xml'
+      - 'Dockerfile'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: math-operations
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+        
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+        
+    - name: Build Docker image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      run: |
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+        
+    - name: Push to ECR
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      run: |
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+        
+    - name: Deploy to EC2
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        EC2_HOST: ${{ secrets.EC2_HOST }}
+        EC2_USER: ${{ secrets.EC2_USER }}
+        EC2_KEY: ${{ secrets.EC2_PRIVATE_KEY }}
+      run: |
+        # Save the private key
+        echo "$EC2_KEY" > ec2-key.pem
+        chmod 600 ec2-key.pem
+        
+        # Create docker-compose file for deployment
+        cat > docker-compose.prod.yml << EOF
+        version: '3.8'
+        services:
+          math-operations:
+            image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+            container_name: math-operations-app
+            restart: unless-stopped
+            environment:
+              - JAVA_OPTS=-Xms256m -Xmx512m -XX:+UseG1GC
+            volumes:
+              - ./logs:/app/logs
+            stdin_open: true
+            tty: true
+        EOF
+        
+        # Copy files to EC2
+        scp -o StrictHostKeyChecking=no -i ec2-key.pem docker-compose.prod.yml $EC2_USER@$EC2_HOST:~/
+        
+        # Deploy on EC2
+        ssh -o StrictHostKeyChecking=no -i ec2-key.pem $EC2_USER@$EC2_HOST "
+          # Install Docker if not present
+          if ! command -v docker &> /dev/null; then
+            sudo yum update -y
+            sudo yum install -y docker
+            sudo systemctl start docker
+            sudo systemctl enable docker
+            sudo usermod -a -G docker $EC2_USER
+          fi
+          
+          # Install Docker Compose if not present
+          if ! command -v docker-compose &> /dev/null; then
+            sudo curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+            sudo chmod +x /usr/local/bin/docker-compose
+          fi
+          
+          # Login to ECR
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+          
+          # Stop existing containers
+          docker-compose -f docker-compose.prod.yml down 2>/dev/null || true
+          
+          # Pull and start new containers
+          docker-compose -f docker-compose.prod.yml pull
+          docker-compose -f docker-compose.prod.yml up -d
+          
+          # Clean up old images
+          docker image prune -f
+        "
+        
+        rm -f ec2-key.pem
+        
+    - name: Verify Docker deployment
+      env:
+        EC2_HOST: ${{ secrets.EC2_HOST }}
+        EC2_USER: ${{ secrets.EC2_USER }}
+        EC2_KEY: ${{ secrets.EC2_PRIVATE_KEY }}
+      run: |
+        echo "$EC2_KEY" > ec2-key.pem
+        chmod 600 ec2-key.pem
+        
+        ssh -o StrictHostKeyChecking=no -i ec2-key.pem $EC2_USER@$EC2_HOST "
+          echo 'Container Status:'
+          docker ps
+          echo ''
+          echo 'Container Logs:'
+          docker logs math-operations-app --tail 20
+        "
+        
+        rm -f ec2-key.pem
